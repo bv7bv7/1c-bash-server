@@ -1,0 +1,163 @@
+#!/bin/bash
+set -x
+_1c_file="`find /opt/1C/v*/ -name "1cv[[:digit:]]"`"
+test -f ${XDG_CONFIG_HOME:-~/.config}/user-dirs.dirs && source ${XDG_CONFIG_HOME:-~/.config}/user-dirs.dirs
+[ -z "$XDG_DESKTOP_DIR" ] && export XDG_DESKTOP_DIR="$HOME/Desktop"
+[ -z "$XDG_CONFIG_HOME" ] && export XDG_CONFIG_HOME="$HOME/.config"
+script_name="$(basename $0)"
+config_path="$XDG_CONFIG_HOME/$script_name"
+config_file="$config_path/$script_name.cfg"
+aurostart_config_path="$XDG_CONFIG_HOME/autostart"
+autostart_config_file="$aurostart_config_path/$script_name.desktop"
+log_file="${TMPDIR-/tmp}/$script_name.log"
+desktop_file="$XDG_DESKTOP_DIR/$script_name.desktop"
+log_need_update_db_cfg="need update-db-cfg"
+log() {
+	echo "\
+$(date) $USER
+$1" >> "$log_file"
+}
+setup-config() {
+	[ ! -d "$config_path" ] && mkdir -p "$config_path"
+	[ ! -f "$config_file" ] && echo "\
+db-type                = Server                           # File/Server
+db-path                =                                  # Path to the database file
+db-server              =                                  # Address of the server 1C 
+db-name                =                                  # Database name in the server 1C
+admin-user             = AdminUser                        # Administartor username
+admin-password         = AdminUserPassword                # Administartor password
+auto-user              = ExchangeUser                     # Autostart username or empty for disable autostart
+auto-password          = ExchangeUserPassword             # Autostart password
+update-key             = ПакетноеОбновлениеКонфигурацииИБ # Secret key for update database configuration
+parameter-logoff-users = ЗавершитьРаботуПользователей     # Logoff users parameter
+parameter-logon-users  = РазрешитьРаботуПользователей     # Enable logon users parameter\
+" > "$config_file"
+	vi "$config_file"
+}
+load-config() {
+	db_type=""
+	db_path=""
+	db_server=""
+	db_name=""
+	admin_user=""
+	admin_password=""
+	auto_user=""
+	auto_password=""
+	update_key=""
+	parameter_logoff_users=""
+	parameter_logon_users=""
+	parameter_db=""
+	while IFS== read -r name value
+	do
+		case "$name" in
+			db-type)                db_type="${value:0:1}" ;;
+			db-path)                db_path="$value" ;;
+			db-server)              db_server="$value" ;;
+			db-name)                db_name="$value" ;;
+			admin-user)             admin_user="$value" ;;
+			admin-password)         admin_password="$value" ;;
+			auto-user)              auto_user="$value" ;;
+			auto-password)          auto_password="$value" ;;
+			update-key)             update_key="$value" ;;
+			parameter-logoff-users) parameter_logoff_users="$value" ;;
+			parameter-logon-users)  parameter_logon_users="$value" ;;
+		esac
+	done < <(sed -n 's/^[[:space:]]*\([[:alpha:]_][[:alnum:]_-]*\)[[:space:]]*=[[:space:]]*\(["'"'"'`]\?\)\([^[:space:]"'"'"'`#]\+\)\2[[:space:]]*\(#.*\)\?$/\1=\3/p' "$config_file")
+	[ "$db_type" == "F" ] && [ -n "$db_path" ] && parameter_db="/${db_type}${db_path}"
+	[ "$db_type" == "S" ] && [ -n "$db_server" ] && [ -n "$db_name" ] && parameter_db="/${db_type}${db_server}\\${db_name}"
+	[ -n "$_1c_file" ] && [ -n "$parameter_db" ] && {
+		[ -n "$auto_user" ] && cmd_autostart="$_1c_file ENTERPRISE $parameter_db /WA- /N$auto_user /P$auto_password /DisableStartupMessages"
+		[ -n "$admin_user" ] && [ -n "$admin_password" ] && [ -n "$update_key" ] && {
+			[ -n "$parameter_logoff_users" ] && cmd_logoff_users="$_1c_file ENTERPRISE $parameter_db /WA- /N$admin_user /P$admin_password /UC$update_key /DisableStartupMessages -NoTruncate /C$parameter_logoff_users" && cmd_uc="$_1c_file $parameter_db /WA- /N$admin_user /P$admin_password /UC$update_key /DisableStartupMessages -NoTruncate"
+			[ -n "$parameter_logon_users"  ] && cmd_logon_users="$_1c_file ENTERPRISE $parameter_db /WA- /N$admin_user /P$admin_password /UC$update_key /DisableStartupMessages -NoTruncate /C$parameter_logon_users"
+			[ -n "$parameter_logoff_users" ] && [ -n "$parameter_logon_users"  ] && cmd_update_db_cfg="$_1c_file CONFIG $parameter_db /WA- /N$admin_user /P$admin_password /UpdateDBCfg /UC$update_key /DisableStartupMessages -NoTruncate"
+		}
+	}
+}
+setup-autostart-config() {
+	[ ! -d "$aurostart_config_path" ] && mkdir -p "$aurostart_config_path"
+	[ ! -f "$autostart_config_file" ] && echo "\
+[Desktop Entry]
+Name=$script_name
+GenericName=$script_name
+Comment=Start 1C client for autoupdate
+Exec=gnome-terminal -e $0
+Terminal=false
+Type=Application
+X-GNOME-Autostart-enabled=true\
+" > "$autostart_config_file"
+}
+help() {
+	echo "\
+--help
+	Show this help.
+--logoff-users
+	Logoff database users and disable logon.
+--logon-users
+	Enable logon database users.
+--update-db-cfg
+	Update database configuration.
+--uc
+	Run when logon is disabled.\
+"
+}
+logoff-users() {
+	[ -n "$cmd_logoff_users" ] && ( ! ps aux | grep -F "$cmd_logoff_users" | grep -v "grep" ) && (
+		$cmd_logoff_users
+		echo "logoff-users-ok"
+	)
+}
+logon-users() {
+	[ -n "$cmd_logon_users" ] && ( ! ps aux | grep -F "$cmd_logon_users" | grep -v "grep" ) && (
+		$cmd_logon_users
+		echo "logon-users-ok"
+	)
+}
+update-db-cfg() {
+	if [ -z "$XDG_CURRENT_DESKTOP" ]
+	then
+		log "$log_need_update_db_cfg"
+	else
+		if [ -n "$cmd_update_db_cfg" ] && logoff-users 
+		then
+			log "finished logoff-users"
+			( ! ps aux | grep -F "$cmd_update_db_cfg" | grep -v "grep" ) && $cmd_update_db_cfg && log "finished update-db-cfg"
+			logon-users && log "finished logon-users"
+		fi
+	fi
+}
+uc() {
+	[ -n "$cmd_uc" ] && (
+		$cmd_uc
+		echo "uc"
+	)
+}
+autostart() {
+	if [ ! -z "$XDG_CURRENT_DESKTOP" ]
+	then
+		while [ 1 ]
+		do
+			( tail -n1 "$log_file" | grep -F "$log_need_update_db_cfg" ) && update-db-cfg
+			sleep 60
+		done
+	fi
+}
+log "start $0 $@"
+chmod 666 "$log_file"
+if [ -z "$XDG_CURRENT_DESKTOP" ] && [ "$1" == "--update-db-cfg" ]
+then
+	update-db-cfg
+else
+	[ ! -f "$config_file" ] && setup-config
+	[ -f "$config_file" ] && load-config
+	[ ! -f "$autostart_config_file" ] && setup-autostart-config
+	[ ! -z "$XDG_CURRENT_DESKTOP" ] && [ -f "$autostart_config_file" ] && [ ! -f "$desktop_file" ] && cp -sv "$autostart_config_file" "$desktop_file"
+	case "$1" in
+	--help) help ;;
+	--logoff-users) logoff-users ;;
+	--logon-users) logon-users ;;
+	--update-db-cfg) update-db-cfg ;;
+	--uc) uc ;;
+	*) autostart ;;
+	esac
+fi
